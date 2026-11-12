@@ -23,10 +23,11 @@ OUTPUT_DIR = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
 SEED = 20261112
 N_SIMS = 8000
 MAX_CANDIDATES = 250
-N_NEWCOMERS = 25
-NEWCOMER_SD = 0.55
-SIZE_UNIFORM_MIX = 0.12
+N_NEWCOMERS = 120
+NEWCOMER_SD = 0.70
+SIZE_UNIFORM_MIX = 0.06
 MIN_ROW_P = 0.0005
+FILL_P = 0.0005
 MAX_ROWS_PER_PLACE = 100
 MICRO = 1_000_000
 # Plausible log10-cap range in SOL. A random walk's unbounded upside would
@@ -160,7 +161,9 @@ def main():
             peaks.append(max(early))
     peaks.sort()
     if len(peaks) >= 10:
-        newcomer_mean = peaks[len(peaks) // 2]
+        # Upper quartile, not the median: a newcomer that takes a top-5
+        # place is a right-tail riser, not a typical new coin.
+        newcomer_mean = peaks[(3 * len(peaks)) // 4]
     else:
         top10 = sorted((logcap_sol(r["market_cap_lamports"]) for r in last_rows[:10]))
         newcomer_mean = top10[len(top10) // 2] - 0.4
@@ -196,7 +199,7 @@ def main():
         n = len(changes)
         mu = sum(d / dt for d, dt in changes) / n
         mu = mu * n / (n + 4.0)
-        mu = max(-0.08, min(0.08, mu))
+        mu = max(-0.24, min(0.24, mu))
         var = sum(((d - mu * dt) ** 2) / dt for d, dt in changes) / n
         sig = math.sqrt(var) if var > 0 else 0.15
         return mu, sig
@@ -215,8 +218,8 @@ def main():
     level_sig = max(0.05, min(0.30, level_sig))
     last_levels = levels[-1]
     # Total level drift over the forecast window is bounded: the early
-    # ramp cannot compound for 13 hours. Cap |mu| * mean_horizon at 0.5.
-    level_mu = [max(-0.5, min(0.5, mu * mean_horizon)) / mean_horizon
+    # ramp cannot compound for 13 hours. Cap |mu| * mean_horizon at 1.5.
+    level_mu = [max(-1.5, min(1.5, mu * mean_horizon)) / mean_horizon
                 for mu in level_mu]
 
     rng = random.Random(SEED)
@@ -297,6 +300,19 @@ def main():
                     rows.append((m, p))
         rows.sort(key=lambda r: (-r[1], r[0]))
         rows = rows[:MAX_ROWS_PER_PLACE]
+        # Chart coverage: name the last mark's largest coins not already
+        # named, at a small floor probability. The unnamed share is then
+        # shared only by coins absent from the history (newcomers) instead
+        # of being diluted over the whole future chart, and a fill row
+        # still scores if its coin holds the place.
+        named_mints = {m for m, _ in rows}
+        fill = [r["mint"] for r in last_rows if r["mint"] not in named_mints]
+        fill = fill[:MAX_ROWS_PER_PLACE - len(rows)]
+        if fill:
+            fill_mass = len(fill) * FILL_P
+            scale = max(0.0, (target - fill_mass) / target) if target > 0 else 0.0
+            rows = [(m, p * scale) for m, p in rows]
+            rows += [(m, FILL_P) for m in fill]
         # Floor-round to 6 decimals; leftover mass joins the unnamed share.
         for m, p in rows:
             u = math.floor(p * MICRO)
